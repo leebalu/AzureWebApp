@@ -1,0 +1,123 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  azureSubscription: '<yourServiceConnectionName>'
+  appPath: '<applicationPath>'
+  azureSlotName: '<slotName>'
+  resourceGroup: '<rgName>'
+  azureAppServiceName: '<AppServiceName>'
+
+stages:
+  - stage: Build
+    displayName: 'Build, Test, and Package'
+    jobs:
+      - job: Build
+        displayName: 'Build'
+        steps:
+          - task: Maven@3
+            displayName: 'Maven package'
+            inputs:
+              mavenPomFile: '$(appPath)/pom.xml'
+              goals: 'package'
+              options: '-DskipTests=true'
+              publishJUnitResults: true
+              testResultsFiles: '*/surefire-reports/TEST-.xml'
+              javaHomeOption: 'JDKVersion'
+              jdkVersionOption: '1.11'
+              jdkArchitectureOption: 'x64'
+
+          - task: PublishTestResults@2
+            displayName: 'Publish Test Results'
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '*/surefire-reports/TEST-.xml'
+              mergeTestResults: true
+              failTaskOnFailedTests: true
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)'
+              artifactName: 'drop'
+
+  - stage: DeployStaging
+    displayName: 'Deploy to Azure Web App (Staging)'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: DeployStaging
+        displayName: 'Deploy'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Artifact'
+            inputs:
+              source: 'current'
+              artifact: 'drop'
+              path: '$(Pipeline.Workspace)/drop'
+
+          - task: AzureWebApp@1
+            displayName: 'Deploy to Azure Web App (Staging)'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appName: $(azureAppServiceName)
+              deployToSlotOrASE: true
+              slotName: $(azureSlotName)
+              appType: 'webApp'
+              resourceGroupName: $(resourceGroup)
+              package: '$(Pipeline.Workspace)/drop/target/*.jar'
+
+          - task: AzureAppServiceSettings@1
+            displayName: 'Update App Settings'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appName: $(azureAppServiceName)
+              resourceGroupName: $(resourceGroup)
+              slotName: $(azureSlotName)
+              appSettingsJson: |
+                {
+                  "Environment": "Staging",
+                  "DatabaseConnectionString": "$(Staging.DatabaseConnectionString)"
+                }
+
+  - stage: DeployProduction
+    displayName: 'Deploy to Azure Web App (Production)'
+    dependsOn: DeployStaging
+    condition: succeeded()
+    jobs:
+      - deployment: DeployProduction
+        displayName: 'Deploy (Manual Approval)'
+        environment: 'Production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebApp@1
+                  displayName: 'Deploy to Azure Web App (Production)'
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    appName: $(azureAppServiceName)
+                    appType: 'webApp'
+                    resourceGroupName: $(resourceGroup)
+                    package: '$(Pipeline.Workspace)/drop/target/*.jar'
+
+                - task: AzureAppServiceSettings@1
+                  displayName: 'Update App Settings'
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    appName: $(azureAppServiceName)
+                    resourceGroupName: $(resourceGroup)
+                    slotName: 'production'
+                    appSettingsJson: |
+                      {
+                        "Environment": "Production",
+                        "DatabaseConnectionString": "$(Production.DatabaseConnectionString)"
+                      }
+        environment: 'Production'
+
